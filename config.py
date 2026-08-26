@@ -25,6 +25,18 @@ HARD_STALE_AFTER = float(os.getenv("HARD_STALE_AFTER", "30"))
 WIDE_GAP_PCT = float(os.getenv("WIDE_GAP_PCT", "100"))
 MICRO_NOTIONAL = float(os.getenv("MICRO_NOTIONAL", "0.25"))
 
+# RTDS watchdog:
+# - JSON PING keeps the RTDS connection alive.
+# - DATA_STALE forces a reconnect when the socket remains open but stops
+#   delivering application messages. This specifically addresses the
+#   "WS CONNECTED | msg N seconds ago" failure mode.
+WS_HEARTBEAT_SECONDS = max(
+    2.0, float(os.getenv("WS_HEARTBEAT_SECONDS", "5"))
+)
+WS_DATA_STALE_AFTER = max(
+    15.0, float(os.getenv("WS_DATA_STALE_AFTER", "60"))
+)
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
