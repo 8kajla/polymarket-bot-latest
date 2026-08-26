@@ -37,9 +37,6 @@ LIVE_WS_STATUS = {
     "queued": 0,
     "dropped": 0,
     "duplicates_ignored": 0,
-    "side_unknown": 0,
-    "sell_raw_events": 0,
-    "sell_normalized": 0,
 }
 
 
@@ -292,103 +289,6 @@ def _already_seen(state, row, current_ts=None):
         return True
 
     return False
-
-
-def _candidate_side(item):
-    """
-    Extract the execution side defensively.
-
-    RTDS activity payloads have appeared with the side under different
-    wrappers/field names. BUY was already being recognized, but SELL can be
-    represented by action/direction/orderSide or inside a nested trader/order
-    object. We only accept an explicit BUY/SELL value; we never infer a side
-    from price or size.
-    """
-    direct_keys = (
-        "side", "action", "direction", "orderSide", "order_side",
-        "tradeSide", "trade_side", "executionSide", "execution_side",
-    )
-
-    nested_objects = []
-    for key in ("trade", "execution", "order", "matchedOrder", "matched_order", "details"):
-        value = item.get(key) if isinstance(item, dict) else None
-        if isinstance(value, dict):
-            nested_objects.append(value)
-
-    for obj in [item, *nested_objects]:
-        for key in direct_keys:
-            value = obj.get(key) if isinstance(obj, dict) else None
-            if value is None:
-                continue
-            text = str(value).strip().upper()
-            if text in ("BUY", "SELL"):
-                return text
-
-    # Some payloads expose a type/event field whose value is explicitly BUY
-    # or SELL. Do not treat generic TRADE/ORDER values as a side.
-    for obj in [item, *nested_objects]:
-        for key in ("type", "eventType", "event_type", "tradeType", "trade_type"):
-            value = obj.get(key) if isinstance(obj, dict) else None
-            if value is None:
-                continue
-            text = str(value).strip().upper()
-            if text in ("BUY", "SELL"):
-                return text
-
-    return ""
-
-
-def _wallet_matches_item(item):
-    """Accept a WS execution when ANY authoritative wallet field matches."""
-    candidates = []
-
-    def add(value):
-        if value is None:
-            return
-        if isinstance(value, dict):
-            for k in ("address", "wallet", "proxyWallet", "proxy_wallet", "user"):
-                if value.get(k):
-                    candidates.append(str(value[k]).lower())
-        elif isinstance(value, str) and value.strip():
-            candidates.append(value.strip().lower())
-
-    for key in (
-        "proxyWallet", "proxy_wallet", "user", "wallet",
-        "trader", "maker", "makerAddress", "maker_address",
-        "taker", "takerAddress", "taker_address",
-    ):
-        add(item.get(key) if isinstance(item, dict) else None)
-
-    # Also inspect common nested execution/order wrappers.
-    for parent_key in ("trade", "execution", "order", "matchedOrder", "matched_order"):
-        parent = item.get(parent_key) if isinstance(item, dict) else None
-        if isinstance(parent, dict):
-            for key in (
-                "proxyWallet", "proxy_wallet", "user", "wallet", "trader",
-                "maker", "makerAddress", "maker_address", "taker",
-                "takerAddress", "taker_address",
-            ):
-                add(parent.get(key))
-
-    if not candidates:
-        return False
-
-    return WALLET in candidates
-
-
-def _normalize_ws_item(item):
-    """Return a normalized execution candidate without inventing trades."""
-    if not isinstance(item, dict):
-        return []
-
-    row = dict(item)
-    side = _candidate_side(row)
-    if side:
-        # Preserve the original payload, but force the canonical side used by
-        # utils.trade_side()/normalize_feed_rows().
-        row["side"] = side
-
-    return normalize_feed_rows([row])
 
 
 # ============================================================
@@ -646,29 +546,65 @@ def _ws_worker():
                     ):
                         continue
 
-                    # A SELL can arrive with the trader wallet in a nested
-                    # trader/maker/taker field while proxyWallet points at a
-                    # different execution wrapper. Match against ALL wallet
-                    # fields instead of trusting the first field.
-                    if not _wallet_matches_item(item):
+                    trader = item.get(
+                        "trader"
+                    )
+
+                    nested = (
+                        trader.get(
+                            "address"
+                        )
+                        if isinstance(
+                            trader,
+                            dict,
+                        )
+                        else ""
+                    )
+
+                    wallet = str(
+                        first(
+                            item,
+                            "proxyWallet",
+                            "proxy_wallet",
+                            "user",
+                            "wallet",
+                            default=nested,
+                        )
+                    ).lower()
+
+                    if (
+                        wallet
+                        and wallet != WALLET
+                    ):
+
                         LIVE_WS_STATUS[
                             "ignored_wallet"
                         ] += 1
+
+                        continue
+
+                    if (
+                        not wallet
+                        and str(
+                            nested
+                        ).lower()
+                        != WALLET
+                    ):
+
+                        LIVE_WS_STATUS[
+                            "ignored_wallet"
+                        ] += 1
+
                         continue
 
                     LIVE_WS_STATUS[
                         "wallet_matches"
                     ] += 1
 
-                    raw_side = _candidate_side(item)
-                    if raw_side == "SELL":
-                        LIVE_WS_STATUS["sell_raw_events"] += 1
-                    elif not raw_side:
-                        LIVE_WS_STATUS["side_unknown"] += 1
-
-                    normalized = _normalize_ws_item(item)
-                    LIVE_WS_STATUS["sell_normalized"] += sum(
-                        1 for trade in normalized if trade_side(trade) == "SELL"
+                    normalized = (
+                        normalize_feed_rows(
+                            [item]
+                        )
                     )
 
                     for trade in normalized:
@@ -682,20 +618,6 @@ def _ws_worker():
                         side = trade_side(
                             trade
                         )
-
-                        # Keep the market's native expiry attached to every
-                        # execution. For 5m markets utils.market_end() derives
-                        # the exact five-minute boundary from the slug/title;
-                        # resolution.py then closes the paper position at that
-                        # boundary (with its configured grace period).
-                        if not trade.get("market_end_ts"):
-                            try:
-                                trade["market_end_ts"] = market_end(trade)
-                                duration, seconds = market_duration(trade)
-                                trade["duration"] = duration
-                                trade["duration_seconds"] = seconds
-                            except Exception:
-                                pass
 
                         LIVE_WS_STATUS[
                             "buy_candidates"
@@ -1019,19 +941,21 @@ def _merge_feed_rows(
                 continue
 
         # ----------------------------------------------------
+        # Persistent duplicate from an earlier polling cycle.
+        # ----------------------------------------------------
+
+        if _already_seen(
+            state,
+            row,
+            current,
+        ):
+
+            persistent_duplicates += 1
+            duplicates += 1
+            continue
+
+        # ----------------------------------------------------
         # Accept.
-        #
-        # IMPORTANT:
-        # The feed layer must NOT mark an execution as permanently
-        # processed.  Consumption belongs to the cursor/processing
-        # layer, after the execution has actually been handled.
-        #
-        # This is critical for SELL reliability: if a SELL reaches
-        # the engine but is temporarily rejected (for example because
-        # the local position or bid is temporarily unavailable), the
-        # next feed cycle must still be able to return that execution.
-        #
-        # We only deduplicate executions inside THIS merged batch.
         # ----------------------------------------------------
 
         cycle_exact.add(key)
@@ -1041,6 +965,12 @@ def _merge_feed_rows(
                 econ,
                 [],
             ).append(ts)
+
+        _mark_seen(
+            state,
+            row,
+            current,
+        )
 
         merged.append(row)
 
@@ -1341,39 +1271,39 @@ def fetch_recent_trades_fast(state):
 
     # --------------------------------------------------------
     # DEDICATED SELL RECOVERY
+    #
+    # Polymarket's documented Data API supports side=SELL. Keep this as an
+    # independent recovery path because a SELL can be absent from one live
+    # feed while still being available from the user-scoped trades endpoint.
     # --------------------------------------------------------
-    # The normal /trades feed is retained for BUYs. A second, lightweight
-    # SELL-only request guarantees that a pre-expiry SELL is not hidden by
-    # websocket classification or pagination.
     sell_rows = []
-    sell_poll_due = (
-        now() - num(state.get("last_sell_poll"), 0)
-        >= SELL_POLL_EVERY
-    )
-    if sell_poll_due:
+    last_sell_fetch = num(state.get("last_sell_recovery_fetch"), 0.0)
+    if now() - last_sell_fetch >= SELL_POLL_EVERY:
         try:
-            sell_data = get_json(
+            data = get_json(
                 TRADES_URL,
                 {
                     "user": WALLET,
                     "side": "SELL",
-                    "limit": min(2000, max(1000, TRADE_PAGE_LIMIT * 4)),
+                    "limit": min(10000, TRADE_PAGE_LIMIT),
                     "offset": 0,
                     "takerOnly": False,
                 },
             )
+            if not isinstance(data, list):
+                raise RuntimeError("SELL trades API returned non-list response")
+            for row in normalize_feed_rows(data):
+                if trade_ts(row) >= local_cutoff:
+                    row = dict(row)
+                    row["_feed_source"] = "trades_sell"
+                    sell_rows.append(row)
             state["api_requests"] = state.get("api_requests", 0) + 1
-            if isinstance(sell_data, list):
-                for row in normalize_feed_rows(sell_data):
-                    if trade_ts(row) >= cutoff:
-                        row = dict(row)
-                        row["_feed_source"] = "trades_sell_recovery"
-                        sell_rows.append(row)
+            state["last_sell_recovery_fetch"] = now()
+            sources.append("trades_sell")
         except Exception as e:
-            errors.append(f"sell_recovery:{type(e).__name__}: {e}")
+            errors.append(f"trades_sell:{type(e).__name__}: {e}")
             state["api_errors"] = state.get("api_errors", 0) + 1
-        finally:
-            state["last_sell_poll"] = now()
+            state["last_sell_recovery_fetch"] = now()
 
     # --------------------------------------------------------
     # MERGE
@@ -1510,7 +1440,7 @@ def fetch_recent_trades_fast(state):
             "activity_rows":
                 len(activity_rows),
 
-            "sell_recovery_rows":
+            "sell_rows":
                 len(sell_rows),
 
             "merged_rows":
@@ -1642,60 +1572,6 @@ def fetch_activity_verify():
 # FEED DIAGNOSTICS
 # ============================================================
 
-def activity_vs_trades_diag(trades, activity):
-    """
-    Compare the newest valid timestamps from Activity and Trades.
-
-    Never compare Activity against zero when Trades is empty.  Doing
-    that produces the misleading "1.7 billion seconds ahead" message
-    seen in production.
-    """
-    trade_ts_values = [
-        trade_ts(t)
-        for t in trades
-        if trade_ts(t) > 0
-    ]
-
-    activity_ts_values = [
-        trade_ts(t)
-        for t in activity
-        if trade_ts(t) > 0
-    ]
-
-    newest_trade = max(
-        trade_ts_values,
-        default=0.0,
-    )
-
-    newest_activity = max(
-        activity_ts_values,
-        default=0.0,
-    )
-
-    if (
-        newest_activity <= 0
-        or newest_trade <= 0
-    ):
-        return {
-            "comparable": False,
-            "newest_activity": newest_activity,
-            "newest_trade": newest_trade,
-            "ahead_seconds": None,
-        }
-
-    ahead = (
-        newest_activity
-        - newest_trade
-    )
-
-    return {
-        "comparable": True,
-        "newest_activity": newest_activity,
-        "newest_trade": newest_trade,
-        "ahead_seconds": ahead,
-    }
-
-
 def build_feed_diag(
     trades,
     activity,
@@ -1704,28 +1580,14 @@ def build_feed_diag(
     previous_newest,
 ):
 
-    # Use BOTH REST feeds for freshness diagnostics.  The old
-    # implementation considered Trades only, which could report
-    # "no recent executions" even when Activity had a fresh fill.
-    trade_timestamps = [
+    timestamps = [
         trade_ts(t)
         for t in trades
         if trade_ts(t) > 0
     ]
 
-    activity_timestamps = [
-        trade_ts(t)
-        for t in activity
-        if trade_ts(t) > 0
-    ]
-
-    all_timestamps = (
-        trade_timestamps
-        + activity_timestamps
-    )
-
     newest = max(
-        all_timestamps,
+        timestamps,
         default=previous_newest,
     )
 
@@ -1738,13 +1600,8 @@ def build_feed_diag(
         else None
     )
 
-    rest_ok = bool(
-        trade_diag.get("ok")
-        or activity_diag.get("ok")
-    )
-
     if (
-        rest_ok
+        trade_diag.get("ok")
         and age is not None
         and age <= STALE_AFTER
     ):
@@ -1752,14 +1609,14 @@ def build_feed_diag(
         status = "LIVE"
 
     elif (
-        rest_ok
+        trade_diag.get("ok")
         and age is not None
         and age <= HARD_STALE_AFTER
     ):
 
         status = "STALE"
 
-    elif rest_ok:
+    elif trade_diag.get("ok"):
 
         status = (
             "API_CONNECTED_NO_RECENT_EXECUTIONS"
@@ -1786,7 +1643,7 @@ def build_feed_diag(
             len(activity),
 
         "merged_executions":
-            len(trades) + len(activity),
+            len(trades),
 
         "newest_seen":
             newest,
