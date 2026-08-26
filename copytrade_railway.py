@@ -82,50 +82,20 @@ def main():
                         # SELL stays eligible for the next REST/WS overlap cycle.
                         if copied or side != "SELL":
                             advance_cursor(state, t)
+                        # Retry any SELL that was detected but could not be
+                        # copied on the first attempt. This is independent of
+                        # the cursor, so newer BUYs cannot make a failed SELL
+                        # disappear.
+                        retried_sells = retry_pending_sells(state, now())
+                        if retried_sells:
+                            save(FILES["state"], state)
+
                     activity=[]; activity_diag={"ok":False,"skipped":True}
                     if now()-last_activity_check>=ACTIVITY_EVERY:
                         activity,activity_diag=fetch_activity_verify(); last_activity_check=now()
                         if activity:
                             an=max((trade_ts(x) for x in activity),default=0); tn=max((trade_ts(x) for x in feed),default=0)
                             if an>tn: print(f"  ℹ️ ACTIVITY AHEAD OF TRADES by {an-tn:.1f}s")
-                            trader_seen=set(state.get("trader_ledger_seen", []))
-                            pending_ids=set(state.get("pending_sells", {}).keys())
-                            recovery=[]
-                            for x in activity:
-                                xid=trade_id(x); side_x=trade_side(x)
-                                if side_x=="SELL":
-                                    if xid in pending_ids or xid not in trader_seen:
-                                        recovery.append(x)
-                                elif is_new(state,x):
-                                    recovery.append(x)
-                            recovery.sort(key=lambda x:(trade_ts(x),trade_id(x)))
-                            for t in recovery:
-                                side=trade_side(t)
-                                print("")
-                                print(f"🔔 RECOVERY {side} | {market_name(t)} | ${trade_size(t)*trade_price(t):.4f}")
-                                copied=process_trade(state,t,now(),"activity_recovery")
-                                if copied or side != "SELL":
-                                    advance_cursor(state,t)
-
-                    # Dedicated SELL recovery is independent of the normal
-                    # cursor. This catches a SELL that arrives after later BUYs
-                    # have already advanced the cursor. Successful SELLs are
-                    # excluded after their execution ID is recorded.
-                    trader_seen=set(state.get("trader_ledger_seen", []))
-                    pending_ids=set(state.get("pending_sells", {}).keys())
-                    sell_recovery=[x for x in feed if trade_side(x)=="SELL" and (trade_id(x) in pending_ids or trade_id(x) not in trader_seen)]
-                    sell_recovery.sort(key=lambda x:(trade_ts(x),trade_id(x)))
-                    for t in sell_recovery:
-                        print("")
-                        print(f"🔔 SELL RECOVERY | {market_name(t)} | ${trade_size(t)*trade_price(t):.4f}")
-                        copied=process_trade(state,t,now(),"sell_recovery")
-                        if copied:
-                            advance_cursor(state,t)
-
-                    # Retry pending SELLs every polling cycle, including cycles
-                    # with zero new trades.
-                    if retry_pending_sells(state, now()):
-                        save(FILES["state"], state)
 
                     newest=max((trade_ts(x) for x in feed),default=state.get("last_feed_newest",0))
                     age=now()-newest if newest else None
