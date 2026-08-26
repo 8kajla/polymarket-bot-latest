@@ -1293,6 +1293,11 @@ def fetch_recent_trades_fast(state):
             if not isinstance(data, list):
                 raise RuntimeError("SELL trades API returned non-list response")
             for row in normalize_feed_rows(data):
+                # Some endpoint versions may ignore side=SELL. Filter again
+                # locally so the recovery path can never turn a BUY into a
+                # SELL candidate.
+                if trade_side(row) != "SELL":
+                    continue
                 if trade_ts(row) >= local_cutoff:
                     row = dict(row)
                     row["_feed_source"] = "trades_sell"
