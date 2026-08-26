@@ -207,12 +207,9 @@ def _market_query(pos):
     attempts = []
     if slug:
         attempts.append({"slug": slug, "limit": 5})
-        attempts.append({"slug": slug, "limit": 5, "closed": "true"})
     if condition:
         attempts.append({"condition_ids": [condition], "limit": 5})
-        attempts.append({"condition_ids": [condition], "limit": 5, "closed": "true"})
         attempts.append({"condition_ids": condition, "limit": 5})
-        attempts.append({"condition_ids": condition, "limit": 5, "closed": "true"})
 
     for params in attempts:
         try:
@@ -439,12 +436,15 @@ def settle_due_positions(state, feed=None):
             f"gamma_closed={gamma_closed} clob_closed={clob_closed} "
             f"uma={gamma_status or 'unknown'}"
         )
+        # IMPORTANT: unresolved means OPEN. Never pass None into
+        # resolve_position_object(), because None is falsy and would be
+        # interpreted as a LOSS. Retry this market on the next cycle.
         continue
 
     state["resolution_due_positions"] = due
     state["resolution_unresolved_positions"] = unresolved
     state["resolution_last_changed"] = changed
-    state["resolution_markets_checked"] = len(market_cache)
+    state["resolution_markets_checked"] = len(set(clob_cache) | set(market_cache))
     return changed
 
 
