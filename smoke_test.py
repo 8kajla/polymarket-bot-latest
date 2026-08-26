@@ -99,7 +99,6 @@ trader_after_failed = fs["trader_positions"][ledger.trade_key(sell2)]["shares"]
 assert abs(trader_after_failed - 6.0) < 1e-9
 assert len(fs["pending_sells"]) == 1
 
-# Retry succeeds: only OUR position changes; trader position must remain 6.
 ledger.fetch_book = lambda asset: book_with_bid
 assert ledger.retry_pending_sells(fs, 2011.0) == 1
 assert abs(fs["trader_positions"][ledger.trade_key(sell2)]["shares"] - 6.0) < 1e-9
@@ -115,9 +114,9 @@ resolution.now = lambda: 2000.0
 resolution._clob_market_query = lambda condition: {"closed": False, "tokens": []}
 resolution._market_query = lambda pos: {
     "closed": False,
-    "outcomes": '["Up","Down"]',
-    "outcomePrices": '["0.50","0.50"]',
-    "clobTokenIds": '["UNRES_ASSET","OTHER"]',
+    "outcomes": '[\"Up\",\"Down\"]',
+    "outcomePrices": '[\"0.50\",\"0.50\"]',
+    "clobTokenIds": '[\"UNRES_ASSET\",\"OTHER\"]',
 }
 us = ledger.new_state()
 us["our_positions"]["u"] = {
@@ -137,3 +136,9 @@ assert us["settled_positions"] == 0
 assert abs(us["our_realized_pnl"]) < 1e-9
 
 print("  Unresolved market stays OPEN: PASS")
+
+# New watchdog configuration sanity check.
+from config import WS_HEARTBEAT_SECONDS, WS_DATA_STALE_AFTER
+assert WS_HEARTBEAT_SECONDS >= 2
+assert WS_DATA_STALE_AFTER >= 15
+print("  WS heartbeat/watchdog config: PASS")
