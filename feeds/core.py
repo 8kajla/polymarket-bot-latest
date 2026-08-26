@@ -28,6 +28,7 @@ LIVE_WS_STATUS = {
     "last_message": 0.0,
     "last_error": "",
     "reconnects": 0,
+    "stale_reconnects": 0,
     "received": 0,
     "ignored_wallet": 0,
     "malformed": 0,
@@ -325,6 +326,7 @@ def ws_status_text():
         return (
             "WS DISCONNECTED — REST RECOVERY | "
             f"reconnects {s['reconnects']} | "
+            f"stale {s.get('stale_reconnects', 0)} | "
             f"{str(s['last_error'] or 'reconnecting')[:120]}"
         )
 
@@ -433,14 +435,23 @@ def _ws_worker():
             LIVE_WS_STATUS["last_error"] = ""
             attempt = 0
 
-            last_ping = now()
+            # A WebSocket can remain OPEN while the RTDS application-data
+            # stream silently stops. Track data on THIS connection separately
+            # from the global last_message value so a dead stream cannot look
+            # healthy for hours.
+            connection_started = now()
+            connection_last_data = connection_started
+            last_ping = connection_started
 
             while not LIVE_WS_STOP.is_set():
 
+                current = now()
+
                 if (
-                    now() - last_ping
-                    >= 5
+                    current - last_ping
+                    >= WS_HEARTBEAT_SECONDS
                 ):
+                    # RTDS uses a JSON PING heartbeat.
                     ws.send(
                         json.dumps(
                             {
@@ -448,8 +459,19 @@ def _ws_worker():
                             }
                         )
                     )
+                    last_ping = current
 
-                    last_ping = now()
+                # Ping/pong health is not the same as receiving RTDS data.
+                # Force a reconnect when application data has gone stale.
+                if (
+                    current - connection_last_data
+                    >= WS_DATA_STALE_AFTER
+                ):
+                    raise RuntimeError(
+                        "RTDS data stale for "
+                        f"{current - connection_last_data:.1f}s "
+                        f"(threshold {WS_DATA_STALE_AFTER:.1f}s)"
+                    )
 
                 try:
                     raw = ws.recv()
@@ -496,9 +518,14 @@ def _ws_worker():
 
                     continue
 
+                # Any valid RTDS application message proves that this
+                # connection is still delivering data. Do not use ping/pong
+                # as the application-data freshness signal.
+                connection_last_data = now()
+
                 LIVE_WS_STATUS[
                     "last_message"
-                ] = now()
+                ] = connection_last_data
 
                 LIVE_WS_STATUS[
                     "received"
@@ -729,6 +756,11 @@ def _ws_worker():
             LIVE_WS_STATUS[
                 "reconnects"
             ] += 1
+
+            if "RTDS data stale" in str(exc):
+                LIVE_WS_STATUS[
+                    "stale_reconnects"
+                ] += 1
 
             attempt += 1
 
