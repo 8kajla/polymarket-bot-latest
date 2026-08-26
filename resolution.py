@@ -436,15 +436,16 @@ def settle_due_positions(state, feed=None):
             f"gamma_closed={gamma_closed} clob_closed={clob_closed} "
             f"uma={gamma_status or 'unknown'}"
         )
-        # IMPORTANT: unresolved means OPEN. Never pass None into
-        # resolve_position_object(), because None is falsy and would be
-        # interpreted as a LOSS. Retry this market on the next cycle.
-        continue
+
+        # CRITICAL: unresolved is NOT a loss. Never pass win=None into
+        # resolve_position_object(), because that function treats any
+        # falsey value as LOSS. Keep the paper position OPEN and retry on
+        # the next resolution cycle.
 
     state["resolution_due_positions"] = due
     state["resolution_unresolved_positions"] = unresolved
     state["resolution_last_changed"] = changed
-    state["resolution_markets_checked"] = len(set(clob_cache) | set(market_cache))
+    state["resolution_markets_checked"] = len(market_cache)
     return changed
 
 
