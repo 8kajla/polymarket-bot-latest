@@ -22,6 +22,7 @@ def new_state():
         "sell_detected":0,"sell_rejected_no_position":0,"sell_rejected_liquidity":0,
         "sell_rejected_duplicate":0,"sell_processed":0,"buy_detected":0,
         "pending_sells":{},
+        "trader_ledger_seen":[],"last_sell_recovery_fetch":0.0,
     }
 
 
@@ -141,9 +142,12 @@ def copy_sell(state,t,observed,source="unknown"):
         print(f"     Asset: {trade_asset(t)} | Condition: {trade_condition(t)} | Outcome: {trade_outcome(t)}")
         return False
 
-    saved_fraction = t.get("_mirror_fraction") if isinstance(t, dict) else None
-    if saved_fraction is not None:
-        fraction = min(1.0, max(0.0, num(saved_fraction)))
+    # A pending SELL may be retried after the trader ledger has already been
+    # updated. Preserve the original pre-SELL mirror fraction so retries do
+    # not accidentally oversell our position.
+    stored_fraction = num(t.get("_mirror_fraction"), -1.0)
+    if 0.0 <= stored_fraction <= 1.0:
+        fraction = stored_fraction
     else:
         _,trader_p=_find_position(state,t,"trader_positions")
         trader_before=num(trader_p.get("shares")) if trader_p else 0.0
@@ -170,13 +174,22 @@ def copy_sell(state,t,observed,source="unknown"):
     return True
 
 
-def retry_pending_sells(state, observed=None, max_age_seconds=300):
-    """
-    Retry SELL executions that were detected but temporarily could not be
-    copied (usually because the bid book was empty or the local position was
-    briefly unavailable). This bypasses the normal cursor so a failed SELL
-    cannot disappear merely because newer BUYs advanced the cursor.
-    """
+def _prepare_sell_mirror(state, t):
+    """Capture the trader pre-SELL state before mutating the trader ledger."""
+    _, trader_p = _find_position(state, t, "trader_positions")
+    trader_before = num(trader_p.get("shares")) if trader_p else 0.0
+    sell_size = trade_size(t)
+    if sell_size <= 0:
+        return None
+    if trader_before > 1e-9:
+        return min(1.0, sell_size / trader_before)
+    _, our_p = _find_position(state, t, "our_positions")
+    our_shares = num(our_p.get("shares")) if our_p else 0.0
+    return min(1.0, sell_size / max(our_shares, 1e-12))
+
+
+def retry_pending_sells(state, observed=None, max_age_seconds=900):
+    """Retry failed paper SELLs without re-mutating the trader ledger."""
     observed = now() if observed is None else observed
     pending = state.setdefault("pending_sells", {})
     if not isinstance(pending, dict):
@@ -188,49 +201,51 @@ def retry_pending_sells(state, observed=None, max_age_seconds=300):
         if not isinstance(raw, dict):
             pending.pop(key, None)
             continue
-
         ts = trade_ts(raw)
         if ts and observed - ts > max_age_seconds:
             # The trader ledger was updated when this SELL was first detected.
-            # A pending entry represents a retry of OUR execution only, so
-            # never apply the trader SELL a second time here.
+            # Evicting the retry must never update it a second time.
             state["sell_rejected_duplicate"] = int(state.get("sell_rejected_duplicate", 0)) + 1
             pending.pop(key, None)
             continue
-
-        # A pending SELL is already known; retry only OUR execution.
-        # The trader ledger was updated exactly once in process_trade().
         if copy_sell(state, raw, observed, raw.get("_feed_source", "pending")):
             pending.pop(key, None)
             copied_count += 1
-
     return copied_count
 
 
 def process_trade(state,t,observed,source="unknown"):
     side=trade_side(t)
     if side=="BUY":
-        state["buy_detected"]+=1; copied=copy_buy(state,t,observed,source); update_trader_ledger(state,t); return copied
+        state["buy_detected"]+=1
+        copied=copy_buy(state,t,observed,source)
+        ledger_key = trade_id(t)
+        seen_ledger = state.setdefault("trader_ledger_seen", [])
+        if ledger_key not in seen_ledger:
+            update_trader_ledger(state,t)
+            seen_ledger.append(ledger_key)
+            state["trader_ledger_seen"] = seen_ledger[-20000:]
+        return copied
     if side=="SELL":
-        if not isinstance(t, dict) or "_mirror_fraction" not in t:
-            _, trader_p = _find_position(state, t, "trader_positions")
-            trader_before = num(trader_p.get("shares")) if trader_p else 0.0
-            sell_size = trade_size(t)
-            if trader_before > 1e-9:
-                t["_mirror_fraction"] = min(1.0, sell_size / trader_before)
-            else:
-                _, local_p = _find_position(state, t, "our_positions")
-                local_shares = num(local_p.get("shares")) if local_p else 0.0
-                t["_mirror_fraction"] = min(1.0, sell_size / max(local_shares, 1e-12))
-
+        # Record the original mirror ratio before the trader ledger is reduced.
+        prepared = _prepare_sell_mirror(state, t)
+        if prepared is not None:
+            t = dict(t)
+            t["_mirror_fraction"] = prepared
+        # The trader really did SELL even if our paper execution temporarily
+        # fails. The trader ledger must therefore advance immediately, exactly
+        # once. Recovery feeds may surface the same SELL again while it is
+        # pending, so guard the ledger mutation with a persistent execution ID.
+        ledger_key = trade_id(t)
+        seen_ledger = state.setdefault("trader_ledger_seen", [])
+        if ledger_key not in seen_ledger:
+            update_trader_ledger(state,t)
+            seen_ledger.append(ledger_key)
+            state["trader_ledger_seen"] = seen_ledger[-20000:]
         copied=copy_sell(state,t,observed,source)
         if copied:
             state.get("pending_sells",{}).pop(trade_id(t),None)
         else:
-            t["_feed_source"] = source
             state.setdefault("pending_sells",{})[trade_id(t)]=t
-
-        # Update the trader ledger exactly once, regardless of OUR execution.
-        update_trader_ledger(state,t)
         return copied
     return False
