@@ -24,6 +24,7 @@ STALE_AFTER = float(os.getenv("STALE_AFTER", "5"))
 HARD_STALE_AFTER = float(os.getenv("HARD_STALE_AFTER", "30"))
 WIDE_GAP_PCT = float(os.getenv("WIDE_GAP_PCT", "100"))
 MICRO_NOTIONAL = float(os.getenv("MICRO_NOTIONAL", "0.25"))
+COPY_NOTIONAL_FRACTION = min(1.0, max(0.0, float(os.getenv("COPY_NOTIONAL_FRACTION", "0.10"))))
 
 # RTDS watchdog:
 # - JSON PING keeps the RTDS connection alive.
