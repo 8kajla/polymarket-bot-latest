@@ -122,14 +122,14 @@ def copy_buy(state,t,observed,source="unknown"):
         state["skipped_capital"]+=1; print(f"  ⚠️ SKIP BUY | ${notional:.2f} exceeds available ${max(0,available):.2f}"); return False
     book=fetch_book(trade_asset(t)); our_price,our_shares=buy_vwap(book,notional)
     if our_price is None:
-        state["skipped_liquidity"]+=1; print(f"  ⚠️ SKIP BUY | no sufficient ask liquidity for ${notional:.2f}"); return False
+        state["skipped_liquidity"]+=1; print(f"SKIP BUY | no ask liquidity | ${notional:.2f}"); return False
     key=trade_key(t); p=state["our_positions"].get(key)
     if not p:p=create_position(key,t,"OUR");state["our_positions"][key]=p
     add_buy(p,our_shares,our_price,trade_ts(t))
     latency=max(0,(observed-trade_ts(t))*1000); gap=((our_price-trade_price(t))/trade_price(t)*100) if trade_price(t) else 0
     state["copied_buys"]+=1;state["latency_ms"].append(latency);state["entry_slippage_pct"].append(gap)
     state["fills"].append({"time_ist":ist(observed),"type":"OUR_BUY","trade_id":trade_id(t),"market":market_name(t),"asset":trade_asset(t),"outcome":trade_outcome(t),"trader_price":money(trade_price(t)),"trader_shares":money(trade_size(t)),"trader_notional":money(notional),"our_price":money(our_price),"our_shares":money(our_shares),"our_notional":money(our_shares*our_price),"price_gap_pct":money(gap),"latency_ms":money(latency)})
-    print("  ✅ COPIED BUY");print(f"     Trader: ${notional:.4f} @ ${trade_price(t):.4f}");print(f"     Us:     ${our_shares*our_price:.4f} @ ${our_price:.4f}");print(f"     Gap:    {gap:+.2f}% | Latency: {latency:.0f} ms")
+    print(f"BUY  {market_name(t)[:42]} | T ${trade_price(t):.4f} → U ${our_price:.4f} | gap {gap:+.2f}% | ${our_shares*our_price:.2f} | {latency:.0f}ms")
     return True
 
 
@@ -138,8 +138,7 @@ def copy_sell(state,t,observed,source="unknown"):
     key,p=_find_position(state,t,"our_positions")
     if not p:
         state["sell_rejected_no_position"]+=1
-        print("  ❌ SELL REJECTED | local position not found")
-        print(f"     Asset: {trade_asset(t)} | Condition: {trade_condition(t)} | Outcome: {trade_outcome(t)}")
+        print(f"SKIP SELL | no local position | {market_name(t)[:42]}")
         return False
 
     # A pending SELL may be retried after the trader ledger has already been
@@ -157,12 +156,12 @@ def copy_sell(state,t,observed,source="unknown"):
         else: fraction=min(1.0,sell_size/max(num(p.get("shares")),1e-12))
     shares=min(num(p.get("shares")),num(p.get("shares"))*fraction)
     if shares<=1e-9:
-        state["sell_rejected_no_position"]+=1; print("  ❌ SELL REJECTED | zero local shares"); return False
+        state["sell_rejected_no_position"]+=1; print("SKIP SELL | zero local shares"); return False
 
     book=fetch_book(trade_asset(t)); our_price,proceeds=sell_vwap(book,shares)
     if our_price is None:
         state["sell_rejected_liquidity"]+=1;state["skipped_liquidity"]+=1
-        print(f"  ⚠️ SKIP SELL | insufficient bid liquidity for {shares:.6f} shares")
+        print(f"SKIP SELL | no bid liquidity | {shares:.4f}sh")
         return False
 
     pnl=sell_position(p,shares,our_price,trade_ts(t),"TRADER_SELL")
@@ -170,7 +169,7 @@ def copy_sell(state,t,observed,source="unknown"):
     latency=max(0,(observed-trade_ts(t))*1000);gap=((trade_price(t)-our_price)/trade_price(t)*100) if trade_price(t) else 0
     state["latency_ms"].append(latency);state["exit_slippage_pct"].append(gap)
     state["fills"].append({"time_ist":ist(observed),"type":"OUR_SELL","trade_id":trade_id(t),"market":market_name(t),"asset":trade_asset(t),"outcome":trade_outcome(t),"trader_price":money(trade_price(t)),"trader_shares":money(trade_size(t)),"our_price":money(our_price),"our_shares":money(shares),"our_proceeds":money(proceeds),"our_pnl":money(pnl),"price_gap_pct":money(gap),"latency_ms":money(latency)})
-    print("  ↘️ COPIED SELL");print(f"     Trader: ${trade_price(t):.4f} | Us: ${our_price:.4f}");print(f"     Shares: {shares:.6f} | P&L: ${pnl:+.4f}")
+    print(f"SELL {market_name(t)[:42]} | T ${trade_price(t):.4f} → U ${our_price:.4f} | {shares:.4f}sh | P&L ${pnl:+.2f}")
     return True
 
 
