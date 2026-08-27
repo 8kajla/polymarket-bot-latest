@@ -160,6 +160,35 @@ def resolve_matching_local_positions(state, api_row, win, reason):
     return changed
 
 
+def settle_trader_positions(state, win, market_pos):
+    """Settle observed trader-ledger positions for the same resolved market."""
+    changed = 0
+    settlement_price = 1.0 if win else 0.0
+    for pos in list(state.get("trader_positions", {}).values()):
+        if pos.get("status") != "OPEN" or position_shares(pos) <= 1e-9:
+            continue
+        if not same_market_position(pos, market_pos):
+            continue
+        shares = position_shares(pos)
+        cost = position_entry_cost(pos)
+        proceeds = shares * settlement_price
+        pnl = proceeds - cost
+        closed_at = now()
+        pos.update({
+            "status": "SETTLED", "closed_at": closed_at, "closed_at_ist": ist(closed_at),
+            "settlement_price": settlement_price, "settlement_proceeds": proceeds,
+            "settlement_pnl": pnl, "settlement_result": "WIN" if win else "LOSS",
+            "exit_reason": "MARKET_RESOLUTION", "shares": 0.0,
+            "total_cost": 0.0, "average_entry": 0.0,
+        })
+        state["trader_realized_pnl"] = num(state.get("trader_realized_pnl")) + pnl
+        state["trader_settled_positions"] = int(state.get("trader_settled_positions", 0)) + 1
+        state["trader_settlement_wins"] = int(state.get("trader_settlement_wins", 0)) + int(win)
+        state["trader_settlement_losses"] = int(state.get("trader_settlement_losses", 0)) + int(not win)
+        changed += 1
+    return changed
+
+
 def market_end_ts(obj):
     explicit = first(
         obj,
@@ -415,6 +444,7 @@ def settle_due_positions(state, feed=None):
         win = _clob_resolved_winner(clob_market, pos)
         if win is not None:
             changed += int(resolve_position_object(state, pos, win, "MARKET_RESOLUTION"))
+            changed += settle_trader_positions(state, win, pos)
             continue
 
         if cache_key not in market_cache:
@@ -441,6 +471,30 @@ def settle_due_positions(state, feed=None):
         # resolve_position_object(), because that function treats any
         # falsey value as LOSS. Keep the paper position OPEN and retry on
         # the next resolution cycle.
+
+    # Resolve trader-ledger positions independently of OUR positions. This is
+    # essential for the price-filter bot: a skipped OUR BUY is still a real
+    # trader BUY and must count toward the trader benchmark P&L.
+    for tpos in list(state.get("trader_positions", {}).values()):
+        if not isinstance(tpos, dict) or tpos.get("status") != "OPEN":
+            continue
+        end_ts = num(tpos.get("market_end_ts"), 0) or market_end_ts(tpos)
+        if not end_ts or now() < end_ts + EXIT_GRACE_SECONDS:
+            continue
+        condition = position_condition(tpos)
+        slug = str(tpos.get("slug") or market_slug(tpos) or "").strip()
+        cache_key = condition.lower() if condition else slug.lower()
+        if cache_key not in clob_cache:
+            clob_cache[cache_key] = _clob_market_query(condition)
+        clob_market = clob_cache[cache_key]
+        win = _clob_resolved_winner(clob_market, tpos)
+        if win is None:
+            if cache_key not in market_cache:
+                market_cache[cache_key] = _market_query(tpos)
+            market = market_cache[cache_key]
+            win = _resolved_winner(market, tpos) if market is not None else None
+        if win is not None:
+            changed += settle_trader_positions(state, win, tpos)
 
     state["resolution_due_positions"] = due
     state["resolution_unresolved_positions"] = unresolved
