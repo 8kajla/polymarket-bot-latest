@@ -34,9 +34,11 @@ COPY_NOTIONAL_FRACTION = min(1.0, max(0.0, float(os.getenv("COPY_NOTIONAL_FRACTI
 WS_HEARTBEAT_SECONDS = max(
     2.0, float(os.getenv("WS_HEARTBEAT_SECONDS", "5"))
 )
-WS_DATA_STALE_AFTER = max(
-    15.0, float(os.getenv("WS_DATA_STALE_AFTER", "60"))
+WS_STALE_THRESHOLD_SECONDS = max(
+    30.0, float(os.getenv("WS_STALE_THRESHOLD_SECONDS", os.getenv("WS_DATA_STALE_AFTER", "60")))
 )
+# Backward-compatible alias for older deployments/configs.
+WS_DATA_STALE_AFTER = WS_STALE_THRESHOLD_SECONDS
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
