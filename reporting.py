@@ -36,25 +36,35 @@ def write_reports(state,feed_diag,position_diag,recon):
     save(FILES["fills"],state["fills"]); save(FILES["reconciliation"],state["reconciliation"]); save(FILES["state"],state)
 
 def print_status(state,feed_diag,recon,force=False):
-    if not force and now()-num(state.get("last_status"))<STATUS_EVERY:return
-    state["last_status"]=now(); open_cap=open_capital(state); available=max(0,MAX_OPEN_CAPITAL-open_cap); age=feed_diag.get("newest_age_seconds")
-    feed_text=feed_diag.get("status","UNKNOWN") if age is None else f"{feed_diag.get('status','UNKNOWN')} ({age:.1f}s)"
-    n=state["latency_count"]; avg=state["latency_sum_ms"]/n if n else 0
-    print("");print("="*68);print(f"[{ist()}] 60-SECOND STATUS");print("="*68)
-    print(f"Feed: {feed_text} | New this cycle: {feed_diag.get('new_this_cycle',0)}")
-    print(f"Live WS: {ws_status_text()}")
-    print(f"WS wallet matches: {LIVE_WS_STATUS['wallet_matches']} | BUY candidates: {LIVE_WS_STATUS['buy_candidates']} | SELL candidates: {LIVE_WS_STATUS['sell_candidates']}")
-    print(f"Copied: BUY {state['copied_buys']} | SELL {state['copied_sells']} | Size {COPY_NOTIONAL_FRACTION*100:.0f}% of trader")
-    print(f"Capital: OPEN ${open_cap:.2f} | FREE ${available:.2f} / ${MAX_OPEN_CAPITAL:.2f}")
-    print(f"P&L: OUR ${state['our_realized_pnl']:+.2f} | TRADER ${state['trader_realized_pnl']:+.2f} | Trader W/L {state.get('trader_settlement_wins',0)}/{state.get('trader_settlement_losses',0)}")
-    if n: print(f"Latency: avg {avg:.0f}ms | min {state['latency_min_ms'] or 0:.0f}ms | max {state['latency_max_ms']:.0f}ms")
-    else: print("Latency: no copied executions yet")
-    print(f"Feed rows: trades {feed_diag.get('trades_executions',0)} | activity {feed_diag.get('activity_executions',0)}")
-    print(f"SELL diagnostics: detected {state['sell_detected']} | processed {state['sell_processed']} | no-position {state['sell_rejected_no_position']} | no-bid {state['sell_rejected_liquidity']} | pending {len(state.get('pending_sells',{}))}")
-    print(f"Quality: wide-gap {state['wide_gap_count']} | micro-trades {state['micro_trade_count']} | API errors {state['api_errors']}")
-    print(f"Exits: SELL {state['copied_sells']} | Settled {state['settled_positions']} | Wins {state['settlement_wins']} | Losses {state['settlement_losses']}")
-    print(f"Resolution: due {state.get('resolution_due_positions',0)} | unresolved {state.get('resolution_unresolved_positions',0)} | markets checked {state.get('resolution_markets_checked',0)}")
-    api_age=now()-state["api_last_ok"] if state["api_last_ok"] else None
-    print(f"API: {'OK '+format(api_age,'.0f')+'s ago' if api_age is not None else 'NO SUCCESS'} | Requests {state['api_requests']} | Errors {state['api_errors']} | Rate limits {state['api_rate_limits']}")
-    print(f"Reconcile: match {recon.get('matches',0)} | share diff {recon.get('share_mismatches',0)} | missing local {recon.get('missing_local',0)} | missing API {recon.get('missing_api',0)}")
-    print("="*68)
+    if not force and now()-num(state.get("last_status"))<STATUS_EVERY:
+        return
+    state["last_status"]=now()
+    open_cap=open_capital(state)
+    available=max(0,MAX_OPEN_CAPITAL-open_cap)
+    age=feed_diag.get("newest_age_seconds")
+    feed_text=feed_diag.get("status","UNKNOWN") if age is None else f"{feed_diag.get('status','UNKNOWN')} {age:.1f}s"
+    n=state["latency_count"]
+    avg=state["latency_sum_ms"]/n if n else 0
+
+    try:
+        from trading.priority import stats as priority_stats
+        ps=priority_stats()
+    except Exception:
+        ps={"queue_depth":0,"processed":0,"errors":0,"last_copy_ms":0}
+
+    trader_w=state.get("trader_settlement_wins",0)
+    trader_l=state.get("trader_settlement_losses",0)
+    trader_total=trader_w+trader_l
+    trader_wr=(trader_w/trader_total*100) if trader_total else 0
+
+    print("")
+    print(f"[{ist()}] STATUS | FEED {feed_text} | WS {ws_status_text()}")
+    print(f"COPY  {state['copied_buys']}B/{state['copied_sells']}S | {COPY_NOTIONAL_FRACTION*100:.0f}% size | queue {ps.get('queue_depth',0)}")
+    print(f"LAT   avg {avg:.0f}ms | min {state['latency_min_ms'] or 0:.0f}ms | max {state['latency_max_ms']:.0f}ms | last {ps.get('last_copy_ms',0):.0f}ms")
+    print(f"CAP   open ${open_cap:.2f} | free ${available:.2f}/${MAX_OPEN_CAPITAL:.2f}")
+    print(f"P&L   ours ${state['our_realized_pnl']:+.2f} | trader ${state['trader_realized_pnl']:+.2f} | trader W/L {trader_w}/{trader_l} ({trader_wr:.0f}%)")
+    print(f"EXIT  settled {state['settled_positions']} | W/L {state['settlement_wins']}/{state['settlement_losses']} | pending SELL {len(state.get('pending_sells',{}))}")
+    print(f"API   {state['api_requests']} req | {state['api_errors']} err | reconcile {recon.get('matches',0)} match/{recon.get('share_mismatches',0)} diff")
+    if ps.get("errors") or state.get("api_errors"):
+        print(f"WARN  priority errors {ps.get('errors',0)} | API errors {state.get('api_errors',0)}")
+    print("-"*72)
