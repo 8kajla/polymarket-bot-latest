@@ -16,7 +16,7 @@ def new_state():
         "api_requests":0,"last_reconcile":0.0,"last_status":0.0,"latency_count":0,"latency_sum_ms":0.0,
         "latency_max_ms":0.0,"latency_min_ms":None,"wide_gap_count":0,"micro_trade_count":0,
         "last_closed_check":0.0,"last_resolution_check":0.0,"settled_positions":0,"settlement_wins":0,
-        "settlement_losses":0,"exit_events":0,"skipped_liquidity":0,"latency_ms":[],
+        "settlement_losses":0,"trader_settled_positions":0,"trader_settlement_wins":0,"trader_settlement_losses":0,"exit_events":0,"skipped_liquidity":0,"latency_ms":[],
         "entry_slippage_pct":[],"exit_slippage_pct":[],"polls":0,"last_poll":None,
         "ws_received":0,"ws_reconnects":0,"ws_last_message":0.0,"ws_dropped":0,"audit_events":0,
         "sell_detected":0,"sell_rejected_no_position":0,"sell_rejected_liquidity":0,
@@ -116,7 +116,7 @@ def update_trader_ledger(state,t):
 
 
 def copy_buy(state,t,observed,source="unknown"):
-    notional=trade_size(t)*trade_price(t); available=MAX_OPEN_CAPITAL-open_capital(state)
+    notional=trade_size(t)*trade_price(t)*COPY_NOTIONAL_FRACTION; available=MAX_OPEN_CAPITAL-open_capital(state)
     if notional<=0:return False
     if notional>available+1e-9:
         state["skipped_capital"]+=1; print(f"  ⚠️ SKIP BUY | ${notional:.2f} exceeds available ${max(0,available):.2f}"); return False
