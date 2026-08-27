@@ -14,11 +14,16 @@ def write_reports(state,feed_diag,position_diag,recon):
     wins=sum(1 for x in closed if num(x.get("pnl"))>0); losses=sum(1 for x in closed if num(x.get("pnl"))<0)
     summary={"version":"7.0","updated_ist":ist(),"wallet":WALLET,
       "simulator":{"max_capital":MAX_OPEN_CAPITAL,"open_capital":money(open_cap),"available_capital":money(max(0,MAX_OPEN_CAPITAL-open_cap)),
-        "realized_pnl":money(state["our_realized_pnl"]),"copied_buys":state["copied_buys"],"copied_sells":state["copied_sells"],
+        "realized_pnl":money(state["our_realized_pnl"]),"copy_notional_fraction":COPY_NOTIONAL_FRACTION,"copied_buys":state["copied_buys"],"copied_sells":state["copied_sells"],
         "duplicates_ignored":state["duplicates_ignored"],"closed_trades":len(closed),"wins":wins,"losses":losses,
         "win_rate_pct":money(wins/len(closed)*100) if closed else 0,"skipped_capital":state["skipped_capital"],
         "skipped_liquidity":state["skipped_liquidity"],"api_errors":state["api_errors"]},
-      "trader":{"realized_pnl":money(state["trader_realized_pnl"]),"open_positions":sum(1 for p in state["trader_positions"].values() if p["status"]=="OPEN" and p["shares"]>1e-9)},
+      "trader":{"realized_pnl":money(state["trader_realized_pnl"]),
+        "open_positions":sum(1 for p in state["trader_positions"].values() if p["status"]=="OPEN" and p["shares"]>1e-9),
+        "settled_positions":state.get("trader_settled_positions",0),
+        "wins":state.get("trader_settlement_wins",0),
+        "losses":state.get("trader_settlement_losses",0),
+        "win_rate_pct":money(state.get("trader_settlement_wins",0)/max(1,state.get("trader_settlement_wins",0)+state.get("trader_settlement_losses",0))*100)},
       "live_feed":feed_diag,
       "sell_diagnostics":{"detected":state["sell_detected"],"processed":state["sell_processed"],
         "no_position":state["sell_rejected_no_position"],"liquidity":state["sell_rejected_liquidity"],"pending":len(state.get("pending_sells",{})),"resolution_due":state.get("resolution_due_positions",0),"resolution_redeemable_checked":state.get("resolution_redeemable_checked",0)},
@@ -39,9 +44,9 @@ def print_status(state,feed_diag,recon,force=False):
     print(f"Feed: {feed_text} | New this cycle: {feed_diag.get('new_this_cycle',0)}")
     print(f"Live WS: {ws_status_text()}")
     print(f"WS wallet matches: {LIVE_WS_STATUS['wallet_matches']} | BUY candidates: {LIVE_WS_STATUS['buy_candidates']} | SELL candidates: {LIVE_WS_STATUS['sell_candidates']}")
-    print(f"Copied: BUY {state['copied_buys']} | SELL {state['copied_sells']}")
+    print(f"Copied: BUY {state['copied_buys']} | SELL {state['copied_sells']} | Size {COPY_NOTIONAL_FRACTION*100:.0f}% of trader")
     print(f"Capital: OPEN ${open_cap:.2f} | FREE ${available:.2f} / ${MAX_OPEN_CAPITAL:.2f}")
-    print(f"P&L: OUR ${state['our_realized_pnl']:+.2f} | TRADER ${state['trader_realized_pnl']:+.2f}")
+    print(f"P&L: OUR ${state['our_realized_pnl']:+.2f} | TRADER ${state['trader_realized_pnl']:+.2f} | Trader W/L {state.get('trader_settlement_wins',0)}/{state.get('trader_settlement_losses',0)}")
     if n: print(f"Latency: avg {avg:.0f}ms | min {state['latency_min_ms'] or 0:.0f}ms | max {state['latency_max_ms']:.0f}ms")
     else: print("Latency: no copied executions yet")
     print(f"Feed rows: trades {feed_diag.get('trades_executions',0)} | activity {feed_diag.get('activity_executions',0)}")
