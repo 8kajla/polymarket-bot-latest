@@ -5,6 +5,8 @@ os.environ.setdefault("POLYMARKET_WALLET", "0x0000000000000000000000000000000000
 os.environ.setdefault("DATA_DIR", "/app/data")
 
 from trading import ledger
+from config import COPY_NOTIONAL_FRACTION
+assert abs(COPY_NOTIONAL_FRACTION - 0.10) < 1e-12
 
 ledger.fetch_book = lambda asset: {
     "asks": [{"price": "0.50", "size": "100"}],
@@ -21,18 +23,19 @@ sell = {"id":"smoke-sell","timestamp":1010,"side":"SELL","size":4,"price":0.60,
 
 assert ledger.process_trade(state, buy, 1000.5) is True
 assert state["copied_buys"] == 1
-assert abs(ledger.open_capital(state) - 5.0) < 1e-9
+assert abs(ledger.open_capital(state) - 0.5) < 1e-9
 
 assert ledger.process_trade(state, sell, 1010.5) is True
 assert state["copied_sells"] == 1
 assert state["sell_detected"] == 1
 assert state["sell_processed"] == 1
 assert state["sell_rejected_no_position"] == 0
-assert abs(state["our_realized_pnl"] - 0.4) < 1e-9
-assert abs(ledger.open_capital(state) - 3.0) < 1e-9
+assert abs(state["our_realized_pnl"] - 0.04) < 1e-9
+assert abs(ledger.open_capital(state) - 0.3) < 1e-9
+assert abs(state["trader_realized_pnl"] - 0.4) < 1e-9
 
 print("V7 SMOKE TEST: PASS")
-print("  Fresh capital: $300.00")
+print("  Copy size: 10% of trader notional")
 print("  BUY path: PASS")
 print("  SELL detection: PASS")
 print("  SELL execution: PASS")
@@ -60,6 +63,16 @@ resolution.fetch_redeemable_positions = lambda: []
 resolution.fetch_closed_positions = lambda: []
 
 rs = ledger.new_state()
+rs["trader_positions"]["tk"] = {
+    "position_id": "TRADER:tk", "owner": "TRADER", "key": "tk",
+    "asset": "ASSET", "condition_id": "COND", "outcome": "Up",
+    "market": "Smoke 5m", "slug": "smoke-5m-700",
+    "duration": "5m", "duration_seconds": 300,
+    "market_end_ts": 500, "shares": 10.0, "total_cost": 4.0,
+    "average_entry": 0.4, "realized_pnl": 0.0,
+    "first_buy_timestamp": 1.0, "last_activity_timestamp": 1.0,
+    "status": "OPEN", "exit_reason": None,
+}
 rs["our_positions"]["k"] = {
     "position_id": "OUR:k", "owner": "OUR", "key": "k",
     "asset": "ASSET", "condition_id": "COND", "outcome": "Up",
@@ -70,12 +83,15 @@ rs["our_positions"]["k"] = {
     "first_buy_timestamp": 1.0, "last_activity_timestamp": 1.0,
     "status": "OPEN", "exit_reason": None,
 }
-assert resolution.resolve_cycle(rs) == 1
+assert resolution.resolve_cycle(rs) == 2
 assert rs["our_positions"]["k"]["status"] == "SETTLED"
 assert rs["settlement_wins"] == 1
 assert abs(rs["our_realized_pnl"] - 6.0) < 1e-9
+assert abs(rs["trader_realized_pnl"] - 6.0) < 1e-9
+assert rs["trader_settlement_wins"] == 1
 print("  CLOB winner resolution: PASS")
 print("  5-minute settlement path: PASS")
+print("  Trader resolution P&L: PASS")
 
 # Regression test: failed SELL must update the trader ledger exactly once,
 # while OUR execution remains pending and can be retried later.
