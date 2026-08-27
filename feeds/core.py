@@ -463,31 +463,24 @@ def _ws_worker():
 
                 # Ping/pong health is not the same as receiving RTDS data.
                 # Force a reconnect when application data has gone stale.
-                if (
-                    current - connection_last_data
-                    >= WS_DATA_STALE_AFTER
-                ):
-                    raise RuntimeError(
-                        "RTDS data stale for "
-                        f"{current - connection_last_data:.1f}s "
-                        f"(threshold {WS_DATA_STALE_AFTER:.1f}s)"
+                # The recv timeout below gives this watchdog a bounded check
+                # interval even when the TCP socket remains technically open.
+                staleness = current - connection_last_data
+                if staleness >= WS_STALE_THRESHOLD_SECONDS:
+                    LIVE_WS_STATUS["last_error"] = (
+                        f"WATCHDOG: no message in {staleness:.0f}s, forcing reconnect"
                     )
+                    raise RuntimeError(LIVE_WS_STATUS["last_error"])
 
                 try:
                     raw = ws.recv()
 
-                except Exception as exc:
+                except websocket.WebSocketTimeoutException:
+                    # Expected: this is our periodic watchdog checkpoint, not
+                    # a socket failure. Loop around and re-check staleness.
+                    continue
 
-                    text = str(exc).lower()
-
-                    if (
-                        "timed out"
-                        in text
-                        or "timeout"
-                        in text
-                    ):
-                        continue
-
+                except Exception:
                     raise
 
                 if raw is None:
@@ -710,6 +703,18 @@ def _ws_worker():
 
                         ws_seen[key] = current
 
+                        # Critical path: hand the fill directly to the
+                        # dedicated copy-priority worker. This is deliberately
+                        # before the legacy diagnostic queue.
+                        try:
+                            from trading.priority import submit_priority_trade
+                            if submit_priority_trade(trade):
+                                LIVE_WS_STATUS["priority_queued"] = LIVE_WS_STATUS.get("priority_queued", 0) + 1
+                            else:
+                                LIVE_WS_STATUS["priority_queue_errors"] = LIVE_WS_STATUS.get("priority_queue_errors", 0) + 1
+                        except Exception:
+                            LIVE_WS_STATUS["priority_queue_errors"] = LIVE_WS_STATUS.get("priority_queue_errors", 0) + 1
+
                         try:
 
                             LIVE_WS_QUEUE.put_nowait(
@@ -757,7 +762,7 @@ def _ws_worker():
                 "reconnects"
             ] += 1
 
-            if "RTDS data stale" in str(exc):
+            if "RTDS data stale" in str(exc) or "WATCHDOG:" in str(exc):
                 LIVE_WS_STATUS[
                     "stale_reconnects"
                 ] += 1
@@ -998,12 +1003,9 @@ def _merge_feed_rows(
                 [],
             ).append(ts)
 
-        _mark_seen(
-            state,
-            row,
-            current,
-        )
-
+        # Do not mark executions as seen here. Feed merging is only
+        # discovery/verification; the priority worker owns the execution
+        # cursor so REST discovery cannot pre-consume a live trade.
         merged.append(row)
 
     state[
